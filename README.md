@@ -50,7 +50,14 @@ Mega, Yandex Disk, Dropbox, S3, …). Zero-knowledge: storage providers only eve
 ## Install & run
 
 **Just use it (end user):** build a native installer and open it — no setup, nothing to preinstall
-(the runtime and the rclone engine are bundled inside the app):
+(the runtime and the rclone engine are bundled inside the app). Use the convenience script for your OS:
+
+```bash
+./scripts/package.sh     # macOS (.dmg) / Linux (.deb)
+scripts\package.cmd      # Windows (.msi)
+```
+
+Or call Gradle directly:
 
 ```bash
 ./gradlew :app-desktop:packageDistributionForCurrentOS
