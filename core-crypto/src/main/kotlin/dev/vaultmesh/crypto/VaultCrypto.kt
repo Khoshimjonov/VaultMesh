@@ -24,6 +24,13 @@ class UnlockedVault internal constructor(vmk: ByteArray) : AutoCloseable {
     /** Cipher for encrypting/decrypting file content chunks. */
     fun contentCipher(): ContentCipher = ContentCipher(subKey(SubKeys.CONTENT))
 
+    /**
+     * Returns a COPY of the raw VMK so the caller can stash it for an opt-in "stay unlocked" feature
+     * (e.g. the OS keychain). Highly sensitive: anyone with this can decrypt the vault. The caller must
+     * zeroize the copy when done. This is the only sanctioned way out of the module for the raw key.
+     */
+    fun exportKeyMaterial(): ByteArray = vmk.copyOf()
+
     override fun close() {
         if (!closed) {
             vmkBytes.wipe()
@@ -85,6 +92,16 @@ object VaultCrypto {
         } finally {
             kek.wipe()
         }
+    }
+
+    /**
+     * Rebuilds an [UnlockedVault] from raw VMK bytes previously obtained via
+     * [UnlockedVault.exportKeyMaterial] — used by the opt-in "stay unlocked" path to open the vault
+     * without re-deriving from the password. No password/KDF work happens here.
+     */
+    fun unlockWithKeyMaterial(vmk: ByteArray): UnlockedVault {
+        require(vmk.size == 32) { "VMK must be 32 bytes" }
+        return UnlockedVault(vmk.copyOf())
     }
 
     fun unlockWithRecovery(header: VaultHeader, recoveryKey: String): UnlockedVault {

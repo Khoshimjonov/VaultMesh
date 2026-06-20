@@ -48,6 +48,12 @@ object VaultFactory {
         return Vault(root, header, VaultCrypto.unlockWithRecovery(header, recoveryKey), deviceId)
     }
 
+    /** Opens the vault from raw VMK bytes (the opt-in "stay unlocked" path; no password needed). */
+    fun unlockWithKeyMaterial(root: Path, vmk: ByteArray, deviceId: String = "local"): Vault {
+        val header = readHeader(root)
+        return Vault(root, header, VaultCrypto.unlockWithKeyMaterial(vmk), deviceId)
+    }
+
     /** Persists an updated header (e.g. after a password change). */
     fun writeHeader(root: Path, header: VaultHeader) {
         headerFile(root).writeText(VaultCrypto.serializeHeader(header))

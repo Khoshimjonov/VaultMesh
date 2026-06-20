@@ -86,17 +86,21 @@ compose.desktop {
             // rclone (and any future assets) live here; the matching os-arch subdir is bundled.
             appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))
 
+            val iconsDir = project.layout.projectDirectory.dir("icons")
             macOS {
                 bundleID = "dev.vaultmesh.desktop"
                 dockName = "VaultMesh"
+                iconFile.set(iconsDir.file("VaultMesh.icns"))
             }
             windows {
                 menuGroup = "VaultMesh"
                 // Stable UUID so upgrades replace rather than duplicate the install.
                 upgradeUuid = "7E6F6A2C-2D2E-4C2A-9B1E-2C9C4B4E1A11"
+                iconFile.set(iconsDir.file("VaultMesh.ico"))
             }
             linux {
                 packageName = "vaultmesh"
+                iconFile.set(iconsDir.file("VaultMesh.png"))
             }
         }
     }

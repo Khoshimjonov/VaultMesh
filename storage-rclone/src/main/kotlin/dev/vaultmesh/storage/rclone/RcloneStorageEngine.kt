@@ -1,7 +1,9 @@
 package dev.vaultmesh.storage.rclone
 
+import dev.vaultmesh.storage.RemoteEntry
 import dev.vaultmesh.storage.StorageEngine
 import dev.vaultmesh.storage.StorageTarget
+import dev.vaultmesh.storage.StorageUsage
 import dev.vaultmesh.storage.TransferResult
 import java.nio.file.Path
 
@@ -30,6 +32,10 @@ class RcloneStorageEngine(private val rc: RcloneRc) : StorageEngine {
         runCatching { rc.list(target.fsRoot) }.isSuccess
 
     override suspend fun listConfiguredRemotes(): List<String> = rc.listConfiguredRemotes()
+
+    override suspend fun usage(fs: String): StorageUsage? = rc.about(fs)
+
+    override suspend fun list(fs: String, subPath: String): List<RemoteEntry> = rc.list(fs, subPath)
 
     override suspend fun createRemote(name: String, type: String, parameters: Map<String, String>) =
         rc.configCreate(name, type, parameters)

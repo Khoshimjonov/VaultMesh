@@ -1,6 +1,7 @@
 package dev.vaultmesh.storage.rclone
 
 import dev.vaultmesh.storage.RemoteEntry
+import dev.vaultmesh.storage.StorageUsage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -80,6 +81,22 @@ class RcloneRc(private val baseUrl: String, private val authHeader: String?) {
         call("config/listremotes")["remotes"]?.jsonArray
             ?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
 
+    /**
+     * Quota for [fs] via `operations/about`. Returns null when the backend doesn't support it
+     * (rclone returns an error for e.g. plain S3) so callers can show "not reported" instead of failing.
+     */
+    suspend fun about(fs: String): StorageUsage? = runCatching {
+        val o = call("operations/about", buildJsonObject { put("fs", fs) })
+        StorageUsage(
+            total = o["total"]?.jsonPrimitive?.longOrNull(),
+            used = o["used"]?.jsonPrimitive?.longOrNull(),
+            free = o["free"]?.jsonPrimitive?.longOrNull(),
+            trashed = o["trashed"]?.jsonPrimitive?.longOrNull(),
+            other = o["other"]?.jsonPrimitive?.longOrNull(),
+            objects = o["objects"]?.jsonPrimitive?.longOrNull(),
+        ).takeIf { it.hasAny }
+    }.getOrNull()
+
     /** Creates/updates an rclone remote (e.g. type="drive", "onedrive", "mega", "yandex", "s3"). */
     suspend fun configCreate(name: String, type: String, parameters: Map<String, String>) {
         call(
@@ -100,4 +117,5 @@ class RcloneRc(private val baseUrl: String, private val authHeader: String?) {
     }
 
     private fun JsonPrimitive.longOrZero(): Long = contentOrNull?.toLongOrNull() ?: 0
+    private fun JsonPrimitive.longOrNull(): Long? = contentOrNull?.toLongOrNull()
 }

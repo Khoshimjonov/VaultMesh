@@ -18,6 +18,11 @@ overview and `~/.claude/plans/wild-booping-conway.md` for the full approved arch
   Key wrap: `subtle.AesGcmJce`. Subkeys: `subtle.Hkdf.computeHkdf("HMACSHA256", …)`.
   NOTE: Tink Java isn't in context7 — verify `subtle` signatures via `javap` on the resolved jar.
 - Always zeroize key bytes (`ByteArray.wipe()`); `UnlockedVault` is `AutoCloseable`.
+- Stay-unlocked (opt-in, default OFF, macOS-only): `UnlockedVault.exportKeyMaterial()` /
+  `VaultCrypto.unlockWithKeyMaterial(vmk)` let the app stash the VMK in the macOS Keychain
+  (`KeychainStore`, via the `security` CLI) and auto-unlock on launch (`AppViewModel.tryAutoUnlock`).
+  This is the ONLY sanctioned VMK-persistence path; it's behind a Settings toggle the user must enable,
+  and `Lock` still requires the password for the rest of the session. The password itself is never stored.
 
 ## Vault layout (core-vault) — identical on disk and on every remote
 ```
@@ -26,6 +31,12 @@ overview and `~/.claude/plans/wild-booping-conway.md` for the full approved arch
 <root>/manifest.enc  encrypted file tree (paths/metadata never leak)
 ```
 Chunking is fixed-size 1 MiB MVP (`Vault.CHUNK_SIZE`); FastCDC is a planned upgrade.
+- GC: `Vault.collectGarbage()`/`garbageStats()` mark-and-sweep `objects/` — referenced set = union of
+  ALL manifest entries' `chunkIds` (tombstones carry none). Skips `*.tmp`. LOCAL-ONLY and safe: a swept
+  object is re-imported from a peer on next sync. NOT internally locked — call under the same vault lock
+  as `addFile`/`mergeFrom` (app does, via `withVault`). App auto-runs a debounced `scheduleGc()` after
+  delete/edit/resolveConflict/linked-reconcile/sync, plus a manual "Reclaim space" (Settings). Remote GC
+  is intentionally NOT done (rclone push is additive; pruning a remote could drop a peer's new chunk).
 
 ## Sync (Phase 3) invariants
 - Every `FileEntry` has a `versionVector` (deviceId→counter); `Vault.addFile` bumps it. Device id is
@@ -44,11 +55,19 @@ Chunking is fixed-size 1 MiB MVP (`Vault.CHUNK_SIZE`); FastCDC is a planned upgr
   merge → `applyMergedManifest` → push. Works because all devices of a vault share the master key.
 
 ## Storage transport
-- `storage-spi`: `StorageEngine` (push/pull/reachable/listConfiguredRemotes) + `StorageTarget`.
+- `storage-spi`: `StorageEngine` (push/pull/reachable/listConfiguredRemotes/usage/list) + `StorageTarget`
+  (+ `rootFs()` helper). `StorageUsage` is the quota model.
 - `storage-rclone`: drives a bundled `rclone rcd` (random localhost port + Basic auth) over the RC
   HTTP API. Replication/sync use `sync/copy` on the whole vault dir (rclone handles incremental,
   resumable, retried transfers). Verified against rclone v1.74 RC: `core/version`, `sync/copy`
-  {srcFs,dstFs}, `operations/list` {fs,remote}→{list:[{Path,Name,Size,IsDir}]}, `config/listremotes`.
+  {srcFs,dstFs}, `operations/list` {fs,remote}→{list:[{Path,Name,Size,IsDir}]}, `config/listremotes`,
+  `operations/about` {fs}→{total,used,free,trashed?,other?,objects?} (lowercase keys; errors on
+  backends without quota e.g. plain S3 → `RcloneRc.about` returns null). `RcloneUsageBrowseTest` covers
+  usage()/list() against the local backend.
+- Storage capacity + cloud explorer (app): sidebar bars + per-target cards show `usage(rootFs)`; the
+  dedicated `StorageExplorerWindow` (a second Compose `Window` keyed on `AppViewModel.explorerTarget`)
+  browses `list(rootFs, subPath)`. `rootFs()` is wider than sync's `fsRoot` — the whole remote `<name>:`
+  for cloud, the mirror folder for local — so the explorer shows the entire account incl. the VaultMesh dir.
 - Binary resolution `RcloneBinary.locate()`: -Dvaultmesh.rclone.path → $VAULTMESH_RCLONE →
   ~/.vaultmesh/bin/rclone → PATH. Dev: downloaded to `tools/rclone-bin/rclone` (gitignored); the
   test build + `:app-desktop:run` pass it via system property automatically.
@@ -66,6 +85,11 @@ Chunking is fixed-size 1 MiB MVP (`Vault.CHUNK_SIZE`); FastCDC is a planned upgr
 ## Build / verify
 - Gradle wrapper is committed (8.10.2). No system gradle. `java` = Temurin 17.
 - `./gradlew test` (run after any crypto/vault change). `./gradlew :app-desktop:run` to launch.
+- **Owner wants a FRESH BUILD after every change**: finish a change set with
+  `./gradlew :app-desktop:packageDistributionForCurrentOS` so the installable bundle isn't stale.
+  Output: `app-desktop/build/compose/binaries/main/{app/VaultMesh.app, dmg/VaultMesh-1.0.0.dmg}`.
+  The `.dmg`/`.app` are UNSIGNED — on the owner's Mac clear quarantine once with
+  `xattr -dr com.apple.quarantine /Applications/VaultMesh.app` (real distribution needs Developer ID + notarization).
 - Version catalog: `gradle/libs.versions.toml` (Kotlin 2.1.0, Compose 1.7.3).
 - Build-script gotcha: Compose desktop dep is `compose.desktop.currentOs` (lowercase `s`).
 

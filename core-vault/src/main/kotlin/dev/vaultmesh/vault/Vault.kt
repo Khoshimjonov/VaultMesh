@@ -147,6 +147,79 @@ class Vault internal constructor(
         saveManifest()
     }
 
+    /** Recursively tombstones a folder and everything under it. No-op if nothing matches. */
+    fun removeFolder(vaultPath: String) {
+        val norm = normalize(vaultPath)
+        if (norm.isEmpty()) return
+        manifest.entries
+            .filter { !it.deleted && (it.path == norm || it.path.startsWith("$norm/")) }
+            .map { it.path }
+            .forEach { removeFile(it) }
+    }
+
+    /**
+     * Creates an explicit (possibly empty) folder entry so it persists and shows up even with no files
+     * inside it. Idempotent: returns without changes if a live folder already exists there.
+     */
+    fun createFolder(vaultPath: String) {
+        val norm = normalize(vaultPath)
+        if (norm.isEmpty()) return
+        val existing = manifest.entries.firstOrNull { it.path == norm }
+        if (existing != null && !existing.deleted) return
+        manifest = manifest.upsert(
+            FileEntry(
+                path = norm,
+                isDir = true,
+                versionVector = VV.bump(existing?.versionVector ?: emptyMap(), deviceId),
+            ),
+        )
+        saveManifest()
+    }
+
+    /**
+     * Moves/renames a file or a whole folder. [toPath] is the exact destination path (for a file, the
+     * full new path including name; for a folder, the new folder path). The moved entries keep their
+     * content (chunks are untouched — only path metadata changes); the originals become tombstones so
+     * the move propagates to peers as a delete-here + add-there.
+     */
+    fun move(fromPath: String, toPath: String) {
+        val from = normalize(fromPath)
+        val to = normalize(toPath)
+        if (from.isEmpty() || to.isEmpty() || from == to) return
+        require(to != from && !to.startsWith("$from/")) { "Cannot move a folder into itself" }
+
+        val live = manifest.entries.filter { !it.deleted }
+        val self = live.firstOrNull { it.path == from }
+        val descendants = live.filter { it.path.startsWith("$from/") }
+        if (self == null && descendants.isEmpty()) return
+
+        self?.let { moveEntry(it, from, to) }
+        descendants.forEach { e -> moveEntry(e, e.path, to + e.path.removePrefix(from)) }
+        saveManifest()
+    }
+
+    /** Writes [e] at [newPath] with merged history and tombstones [oldPath]. */
+    private fun moveEntry(e: FileEntry, oldPath: String, newPath: String) {
+        val priorAtNew = manifest.entries.firstOrNull { it.path == newPath }?.versionVector ?: emptyMap()
+        manifest = manifest.upsert(
+            e.copy(
+                path = newPath,
+                conflictOf = null,
+                versionVector = VV.bump(VV.merge(e.versionVector, priorAtNew), deviceId),
+            ),
+        )
+        manifest = manifest.upsert(
+            e.copy(
+                path = oldPath,
+                deleted = true,
+                chunkIds = emptyList(),
+                size = 0,
+                conflictOf = null,
+                versionVector = VV.bump(e.versionVector, deviceId),
+            ),
+        )
+    }
+
     /**
      * Resolves a conflict copy: if [keepConflictVersion] its content replaces the original file;
      * either way the conflict copy is tombstoned. The choice propagates to peers like any edit.
@@ -217,6 +290,12 @@ class Vault internal constructor(
 
     fun list(): List<FileEntry> = manifest.entries.filterNot { it.deleted }.sortedBy { it.path }
 
+    /**
+     * A copy of the raw VMK, for the app's opt-in "stay unlocked" feature (stashed in the OS keychain).
+     * Sensitive — the caller must zeroize it. See [UnlockedVault.exportKeyMaterial].
+     */
+    fun exportKeyMaterial(): ByteArray = unlocked.exportKeyMaterial()
+
     // ---- Sync support ------------------------------------------------------
 
     /**
@@ -251,6 +330,70 @@ class Vault internal constructor(
     fun applyMergedManifest(merged: Manifest) {
         manifest = merged
         saveManifest()
+    }
+
+    /** Outcome of adopting a peer's staged vault. */
+    data class SyncMerge(val imported: Int, val conflicts: List<MergeConflict>)
+
+    /**
+     * Adopts a peer's staged vault: imports any objects we lack, decrypts the peer manifest with our
+     * shared key, merges it with version vectors, and persists the result. This is the only part of a
+     * sync that mutates local state — it does NO network I/O, so callers serialize just this step
+     * (against other vault edits) while pull/push run lock-free.
+     */
+    fun mergeFrom(stagingDir: Path): SyncMerge {
+        val imported = importObjects(stagingDir.resolve("objects"))
+        val staged = stagingDir.resolve("manifest.enc")
+        val remote = if (staged.exists()) runCatching { decryptManifest(staged) }.getOrDefault(Manifest()) else Manifest()
+        val result = ManifestMerger.merge(manifest, remote, deviceId)
+        applyMergedManifest(result.manifest)
+        return SyncMerge(imported, result.conflicts)
+    }
+
+    // ---- Garbage collection ------------------------------------------------
+
+    /** Outcome of a GC sweep (or a dry-run estimate): orphaned objects removed and bytes reclaimed. */
+    data class GcResult(val removedObjects: Int, val bytesFreed: Long, val liveObjects: Int) {
+        val didReclaim: Boolean get() = removedObjects > 0
+    }
+
+    /** Object ids any manifest entry still points at. Tombstones carry no chunks, so they keep nothing. */
+    private fun referencedObjectIds(): Set<String> =
+        manifest.entries.flatMapTo(HashSet()) { it.chunkIds }
+
+    /**
+     * Reclaims local disk by deleting encrypted objects that no manifest entry references any more —
+     * the orphaned chunks left behind by deletions, edits, moves, and resolved conflicts ("tombstone
+     * GC"). Content is addressed by hash, so this is safe in the sync mesh: if a swept object is needed
+     * again later it is re-imported from a peer/remote on the next sync (whoever still references it
+     * still has it). In-flight `.tmp` writes are skipped. Local-only — it never deletes remote objects
+     * (rclone push is additive; pruning a remote could drop a peer's not-yet-merged chunk).
+     *
+     * Not internally synchronized: callers must serialize it against other vault mutations, exactly as
+     * with [addFile]/[mergeFrom] (the app holds its vault lock around all three).
+     */
+    fun collectGarbage(): GcResult = sweepObjects(delete = true)
+
+    /** Estimates what [collectGarbage] would reclaim, without deleting anything. */
+    fun garbageStats(): GcResult = sweepObjects(delete = false)
+
+    private fun sweepObjects(delete: Boolean): GcResult {
+        if (!Files.isDirectory(objectsDir)) return GcResult(0, 0, 0)
+        val referenced = referencedObjectIds()
+        var removed = 0
+        var freed = 0L
+        var live = 0
+        Files.list(objectsDir).use { stream ->
+            stream.forEach { p ->
+                val name = p.fileName.toString()
+                if (!Files.isRegularFile(p) || name.endsWith(".tmp")) return@forEach
+                if (name in referenced) { live++; return@forEach }
+                val size = runCatching { Files.size(p) }.getOrDefault(0L)
+                if (!delete) { removed++; freed += size; return@forEach }
+                if (runCatching { Files.deleteIfExists(p) }.getOrDefault(false)) { removed++; freed += size }
+            }
+        }
+        return GcResult(removed, freed, live)
     }
 
     override fun close() = unlocked.close()
