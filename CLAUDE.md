@@ -69,8 +69,15 @@ Chunking is fixed-size 1 MiB MVP (`Vault.CHUNK_SIZE`); FastCDC is a planned upgr
   browses `list(rootFs, subPath)`. `rootFs()` is wider than sync's `fsRoot` — the whole remote `<name>:`
   for cloud, the mirror folder for local — so the explorer shows the entire account incl. the VaultMesh dir.
 - Binary resolution `RcloneBinary.locate()`: -Dvaultmesh.rclone.path → $VAULTMESH_RCLONE →
-  ~/.vaultmesh/bin/rclone → PATH. Dev: downloaded to `tools/rclone-bin/rclone` (gitignored); the
-  test build + `:app-desktop:run` pass it via system property automatically.
+  `compose.application.resources.dir/rclone` (bundled in the packaged app; materialized into
+  ~/.vaultmesh/bin) → ~/.vaultmesh/bin/rclone → PATH. A missing/stale override path is SKIPPED (logged),
+  never fatal — so a bad override can't shadow the bundled binary. Dev: downloaded to
+  `tools/rclone-bin/rclone` (gitignored); the dev path is passed ONLY to the `run` task.
+  PACKAGING GOTCHA (caused the v1.0.0 "rclone unavailable" bug): JVM args set via
+  `compose.desktop.application { jvmArgs(...) }` are baked into the jpackage `.cfg`, so a dev machine's
+  absolute `-Dvaultmesh.rclone.path` shipped inside the installer and made `locate()` throw on every
+  other machine before it ever reached the bundled binary. Never put machine-specific args there;
+  scope dev-only JVM args to `tasks.named("run")`.
 
 ## In-app provider connect (OAuth + credentials)
 - `StorageEngine.createRemote(name,type,params)` → `RcloneRc.configCreate` posts `config/create`
@@ -83,11 +90,15 @@ Chunking is fixed-size 1 MiB MVP (`Vault.CHUNK_SIZE`); FastCDC is a planned upgr
   createRemote→listConfiguredRemotes→use-as-target path is (`RcloneConfigTest`).
 
 ## Build / verify
-- Gradle wrapper is committed (8.10.2). No system gradle. `java` = Temurin 17.
+- Gradle wrapper is committed (8.10.2). No system gradle. Project compiles/packages on JDK 17
+  (`jvmToolchain(17)`). The toolchain is auto-provisioned via the foojay resolver (settings.gradle.kts),
+  so JDK 17 need NOT be installed — but Gradle 8.10.2 itself can only RUN on JDK ≤23 (it crashes with
+  `IllegalArgumentException: 25` on JDK 25/26). If the machine default is too new, run with
+  `JAVA_HOME=<a JDK 17–23>` (e.g. Corretto 22 here); foojay then fetches 17 for compile + jpackage.
 - `./gradlew test` (run after any crypto/vault change). `./gradlew :app-desktop:run` to launch.
 - **Owner wants a FRESH BUILD after every change**: finish a change set with
   `./gradlew :app-desktop:packageDistributionForCurrentOS` so the installable bundle isn't stale.
-  Output: `app-desktop/build/compose/binaries/main/{app/VaultMesh.app, dmg/VaultMesh-1.0.0.dmg}`.
+  Output: `app-desktop/build/compose/binaries/main/{app/VaultMesh.app, dmg/VaultMesh-<version>.dmg}`.
   The `.dmg`/`.app` are UNSIGNED — on the owner's Mac clear quarantine once with
   `xattr -dr com.apple.quarantine /Applications/VaultMesh.app` (real distribution needs Developer ID + notarization).
 - Version catalog: `gradle/libs.versions.toml` (Kotlin 2.1.0, Compose 1.7.3).

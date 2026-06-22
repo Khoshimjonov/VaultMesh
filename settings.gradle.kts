@@ -9,6 +9,12 @@ pluginManagement {
     }
 }
 
+// Auto-provision the JDK 17 toolchain when it isn't installed locally, so the build keeps working
+// regardless of which JDK happens to be the machine default (Gradle itself can run on a newer JDK).
+plugins {
+    id("org.gradle.toolchains.foojay-resolver-convention") version "0.8.0"
+}
+
 dependencyResolutionManagement {
     repositories {
         mavenCentral()

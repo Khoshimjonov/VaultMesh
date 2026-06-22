@@ -25,8 +25,12 @@ object RcloneBinary {
     fun locate(): Path {
         val exe = if (isWindows()) "rclone.exe" else "rclone"
 
-        System.getProperty("vaultmesh.rclone.path")?.let { return ensureExecutable(verify(Paths.get(it))) }
-        System.getenv("VAULTMESH_RCLONE")?.let { return ensureExecutable(verify(Paths.get(it))) }
+        // Explicit overrides win — but ONLY if they actually point at a file. A stale/invalid
+        // override must never brick the app: e.g. a packaged build can carry a dev machine's path
+        // (a `-Dvaultmesh.rclone.path` baked into the jpackage cfg). When that path is absent we
+        // skip it and fall through to the bundled binary instead of failing outright.
+        override("vaultmesh.rclone.path", System.getProperty("vaultmesh.rclone.path"))?.let { return it }
+        override("VAULTMESH_RCLONE", System.getenv("VAULTMESH_RCLONE"))?.let { return it }
 
         // Bundled inside the installed app (Compose sets this property at runtime). Copy it out to a
         // writable, executable location so it works even when the app is installed read-only.
@@ -70,9 +74,13 @@ object RcloneBinary {
 
     fun isAvailable(): Boolean = runCatching { locate() }.isSuccess
 
-    private fun verify(path: Path): Path {
-        if (!Files.isRegularFile(path)) throw NotFoundException()
-        return path
+    /** A user/dev override is honoured only when it resolves to a real file; otherwise we skip it. */
+    private fun override(source: String, value: String?): Path? {
+        val raw = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val path = Paths.get(raw)
+        if (Files.isRegularFile(path)) return ensureExecutable(path)
+        System.err.println("VaultMesh: ignoring $source='$raw' (no such file); using the bundled rclone instead.")
+        return null
     }
 
     private fun isWindows(): Boolean =

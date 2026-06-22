@@ -64,19 +64,26 @@ val downloadRclone by tasks.registering {
 // Make sure the binary is staged before the app resources are assembled (covers run + packaging).
 tasks.matching { it.name == "prepareAppResources" }.configureEach { dependsOn(downloadRclone) }
 
+// Dev convenience for `./gradlew :app-desktop:run` ONLY: point at the dev rclone binary so a run
+// doesn't need the 80 MB bundled copy. This must NOT live in compose.desktop.application { jvmArgs }
+// — those args are baked into the packaged jpackage `.cfg`, so the dev machine's absolute path would
+// ship inside the installer and make rclone resolution fail on every other machine (the bundled
+// binary at $APPDIR/resources/rclone is only reached if no override is set). Scope it to run.
+val devRclone = rootProject.layout.projectDirectory.dir("tools/rclone-bin").file("rclone").asFile
+if (devRclone.exists()) {
+    tasks.matching { it.name == "run" }.configureEach {
+        (this as? JavaExec)?.jvmArgs("-Dvaultmesh.rclone.path=${devRclone.absolutePath}")
+    }
+}
+
 compose.desktop {
     application {
         mainClass = "dev.vaultmesh.app.MainKt"
 
-        // In a dev `./gradlew run`, point at the dev binary directly (the bundled resource also works).
-        rootProject.layout.projectDirectory.dir("tools/rclone-bin").file("rclone").asFile
-            .takeIf { it.exists() }
-            ?.let { jvmArgs("-Dvaultmesh.rclone.path=${it.absolutePath}") }
-
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "VaultMesh"
-            packageVersion = "1.0.0"
+            packageVersion = "1.0.1"
             description = "Encrypted multi-storage personal vault"
             vendor = "VaultMesh"
 
